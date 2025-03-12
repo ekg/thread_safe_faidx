@@ -28,9 +28,12 @@ void worker_thread(const ts_faidx::FastaReader& reader,
                    int thread_id,
                    std::ofstream* output_file,
                    std::mutex* file_mutex) {
+    // Create a dedicated BGZFReader for this thread
+    std::unique_ptr<ts_faidx::BGZFReader> file(reader.create_reader());
+    
     for (size_t i = start_idx; i < end_idx; ++i) {
         try {
-            auto sequence = reader.fetch_sequence(regions[i]);
+            auto sequence = reader.fetch_sequence(file.get(), regions[i]);
             completed++;
             
             // Write to output file if specified

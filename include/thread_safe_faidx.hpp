@@ -237,41 +237,17 @@ private:
     FileFormat format_ = FileFormat::UNKNOWN; // Format of the file
     mutable std::mutex resource_mutex_;      // Mutex for thread safety
     
-    // Thread-local storage for file handles
-    mutable std::unordered_map<std::thread::id, std::unique_ptr<BGZFReader>> thread_local_files_;
-    
-    /**
-     * @brief Get a thread-local file handle
-     * 
-     * @return BGZFReader* Pointer to the thread's file handle
-     */
-    BGZFReader* get_thread_local_file() const {
-        std::thread::id this_id = std::this_thread::get_id();
-        
-        // Lock to safely check/modify the map
-        std::lock_guard<std::mutex> lock(resource_mutex_);
-        
-        auto it = thread_local_files_.find(this_id);
-        if (it == thread_local_files_.end()) {
-            // Create a new file handle for this thread
-            std::unique_ptr<BGZFReader> file_handle(new BGZFReader(filename_));
-            BGZFReader* result = file_handle.get();
-            thread_local_files_[this_id] = std::move(file_handle);
-            return result;
-        }
-        
-        return it->second.get();
-    }
-    
     /**
      * @brief Retrieve sequence or quality from file
      * 
+     * @param file BGZFReader instance to use for reading
      * @param entry Index entry for the sequence
      * @param start Start position (0-based)
      * @param end End position (0-based, exclusive)
      * @return std::string The requested data
      */
-    std::string retrieve_sequence_data(const IndexEntry& entry, 
+    std::string retrieve_sequence_data(BGZFReader* file,
+                                      const IndexEntry& entry, 
                                       int64_t start, 
                                       int64_t end) const {
         // Boundary checks
@@ -279,10 +255,8 @@ private:
         if (end > entry.length) end = entry.length;
         if (start >= end) return "";
         
-        // Get thread-local file handle
-        BGZFReader* file = get_thread_local_file();
         if (!file) {
-            throw std::runtime_error("Could not get file handle");
+            throw std::runtime_error("Invalid file handle");
         }
         
         std::string result;
@@ -336,12 +310,14 @@ private:
     /**
      * @brief Retrieve quality scores from file (FASTQ only)
      * 
+     * @param file BGZFReader instance to use for reading
      * @param entry Index entry for the sequence
      * @param start Start position (0-based)
      * @param end End position (0-based, exclusive)
      * @return std::string The requested quality data
      */
-    std::string retrieve_quality_data(const IndexEntry& entry, 
+    std::string retrieve_quality_data(BGZFReader* file,
+                                     const IndexEntry& entry, 
                                      int64_t start, 
                                      int64_t end) const {
         // Similar to retrieve_sequence_data but using the qual_offset
@@ -350,10 +326,8 @@ private:
         if (end > entry.length) end = entry.length;
         if (start >= end) return "";
         
-        // Get thread-local file handle
-        BGZFReader* file = get_thread_local_file();
         if (!file) {
-            throw std::runtime_error("Could not get file handle");
+            throw std::runtime_error("Invalid file handle");
         }
         
         std::string result;
@@ -627,14 +601,24 @@ public:
     }
     
     /**
+     * @brief Create a new BGZFReader for the FASTA file
+     * 
+     * @return BGZFReader* A new reader instance
+     */
+    BGZFReader* create_reader() const {
+        return new BGZFReader(filename_);
+    }
+
+    /**
      * @brief Retrieve sequence based on coordinates
      * 
+     * @param file BGZFReader instance to use for reading
      * @param contig Contig/chromosome name
      * @param start Start position (0-based)
      * @param end End position (0-based, exclusive)
      * @return std::string The requested sequence
      */
-    std::string fetch_sequence(const std::string& contig, int64_t start, int64_t end) const {
+    std::string fetch_sequence(BGZFReader* file, const std::string& contig, int64_t start, int64_t end) const {
         try {
             // Find the entry
             auto it = entries_.find(contig);
@@ -645,7 +629,7 @@ public:
             const IndexEntry& entry = it->second;
             
             // Directly retrieve the sequence
-            return retrieve_sequence_data(entry, start, end);
+            return retrieve_sequence_data(file, entry, start, end);
             
         } catch (const std::exception& e) {
             throw std::runtime_error("Error fetching sequence: " + std::string(e.what()));
@@ -655,10 +639,11 @@ public:
     /**
      * @brief Retrieve sequence based on region string
      * 
+     * @param file BGZFReader instance to use for reading
      * @param region Region string (e.g., "chr1:1000-2000")
      * @return std::string The requested sequence
      */
-    std::string fetch_sequence(const std::string& region) const {
+    std::string fetch_sequence(BGZFReader* file, const std::string& region) const {
         std::string contig;
         int64_t start, end;
         
@@ -666,18 +651,19 @@ public:
             throw std::runtime_error("Invalid region format: " + region);
         }
         
-        return fetch_sequence(contig, start, end);
+        return fetch_sequence(file, contig, start, end);
     }
     
     /**
      * @brief Retrieve quality scores based on coordinates (FASTQ only)
      * 
+     * @param file BGZFReader instance to use for reading
      * @param contig Contig/chromosome name
      * @param start Start position (0-based)
      * @param end End position (0-based, exclusive)
      * @return std::string The requested quality scores
      */
-    std::string fetch_quality(const std::string& contig, int64_t start, int64_t end) const {
+    std::string fetch_quality(BGZFReader* file, const std::string& contig, int64_t start, int64_t end) const {
         if (format_ != FileFormat::FASTQ) {
             throw std::runtime_error("Quality scores only available for FASTQ files");
         }
@@ -691,16 +677,17 @@ public:
         const IndexEntry& entry = it->second;
         
         // Retrieve the quality scores
-        return retrieve_quality_data(entry, start, end);
+        return retrieve_quality_data(file, entry, start, end);
     }
     
     /**
      * @brief Retrieve quality scores based on region string (FASTQ only)
      * 
+     * @param file BGZFReader instance to use for reading
      * @param region Region string (e.g., "chr1:1000-2000")
      * @return std::string The requested quality scores
      */
-    std::string fetch_quality(const std::string& region) const {
+    std::string fetch_quality(BGZFReader* file, const std::string& region) const {
         if (format_ != FileFormat::FASTQ) {
             throw std::runtime_error("Quality scores only available for FASTQ files");
         }
@@ -712,7 +699,7 @@ public:
             throw std::runtime_error("Invalid region format: " + region);
         }
         
-        return fetch_quality(contig, start, end);
+        return fetch_quality(file, contig, start, end);
     }
     
     /**
@@ -751,9 +738,7 @@ public:
      * @brief Destructor handles cleanup
      */
     ~FastaReader() {
-        // Close all thread-local file handles
-        std::lock_guard<std::mutex> lock(resource_mutex_);
-        thread_local_files_.clear();
+        // Nothing to cleanup here as file handles are managed externally
     }
 };
 

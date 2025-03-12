@@ -48,10 +48,15 @@ void worker_thread(const ts_faidx::FastaReader& reader,
                 
                 if (consecutive_failures > 0) {
                     // After a failure, try using the FastaFileReader instead
-                    auto region_parts = split_region(regions[i]);
-                    std::string seq_name = region_parts.first;
-                    int64_t start = region_parts.second.first;
-                    int64_t length = region_parts.second.second - start;
+                    std::string seq_name;
+                    int64_t start, end;
+                    
+                    // Use the existing parse_region function from the ts_faidx namespace
+                    if (!ts_faidx::parse_region(regions[i], seq_name, start, end)) {
+                        throw std::runtime_error("Invalid region format: " + regions[i]);
+                    }
+                    
+                    int64_t length = end - start;
                     
                     // Get the entry details
                     auto entry = reader.get_entry(seq_name);
@@ -101,37 +106,6 @@ void worker_thread(const ts_faidx::FastaReader& reader,
     }
 }
 
-// Helper function to split a region string into name and coordinates
-std::pair<std::string, std::pair<int64_t, int64_t>> split_region(const std::string& region) {
-    std::string seq_name;
-    int64_t start = 0, end = 0;
-    
-    // Find the colon separating name from coordinates
-    size_t colon_pos = region.find(':');
-    if (colon_pos == std::string::npos) {
-        // No coordinates, just a sequence name
-        return std::make_pair(region, std::make_pair(0, -1)); // -1 end means whole sequence
-    }
-    
-    seq_name = region.substr(0, colon_pos);
-    
-    // Find the dash separating start and end
-    size_t dash_pos = region.find('-', colon_pos);
-    if (dash_pos == std::string::npos) {
-        // Just a single position
-        start = std::stoll(region.substr(colon_pos + 1));
-        end = start + 1;
-    } else {
-        // Range with start and end
-        start = std::stoll(region.substr(colon_pos + 1, dash_pos - colon_pos - 1));
-        end = std::stoll(region.substr(dash_pos + 1));
-    }
-    
-    // Convert to 0-based coordinates if needed
-    if (start > 0) start--;
-    
-    return std::make_pair(seq_name, std::make_pair(start, end));
-}
 
 int main(int argc, char* argv[]) {
     // Parse command line arguments

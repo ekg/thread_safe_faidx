@@ -14,7 +14,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 # Find required packages
 find_package(Threads REQUIRED)
 
-# Find HTSlib - manual path option
+# Find HTSlib - we only need the BGZF component
 option(HTSLIB_ROOT "Path to HTSlib installation" "")
 if(HTSLIB_ROOT)
     include_directories(${HTSLIB_ROOT}/include)
@@ -37,6 +37,8 @@ else()
         set(HTSLIB_LIBRARIES hts)
     endif()
 endif()
+
+message(STATUS "Using HTSlib for BGZF compression support only")
 
 # Find zlib
 find_package(ZLIB)

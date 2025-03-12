@@ -18,9 +18,9 @@
 #include <cstdio>
 #include <iostream>
 
-// HTSlib includes
+// HTSlib includes - we only need bgzf.h for compressed file handling
 #include <htslib/bgzf.h>
-#include <htslib/faidx.h>
+#include <unistd.h> // for access()
 
 namespace ts_faidx {
 
@@ -257,36 +257,142 @@ private:
      * @brief Retrieve sequence or quality from file
      * 
      * @param entry Index entry for the sequence
-     * @param offset File offset for the data
      * @param start Start position (0-based)
      * @param end End position (0-based, exclusive)
      * @return std::string The requested data
      */
-    std::string retrieve_data(const IndexEntry& entry, 
-                             int64_t offset, 
-                             int64_t start, 
-                             int64_t end) const {
-        // Use htslib's faidx directly for reliable sequence fetching
-        std::string region = entry.name + ":" + 
-                            std::to_string(start+1) + "-" + 
-                            std::to_string(end);
+    std::string retrieve_sequence_data(const IndexEntry& entry, 
+                                      int64_t start, 
+                                      int64_t end) const {
+        // Boundary checks
+        if (start < 0) start = 0;
+        if (end > entry.length) end = entry.length;
+        if (start >= end) return "";
         
-        faidx_t* fai = fai_load(filename_.c_str());
-        if (!fai) {
-            throw std::runtime_error("Failed to load index for " + filename_);
+        // Get thread-local file handle
+        BGZFReader* file = get_thread_local_file();
+        if (!file) {
+            throw std::runtime_error("Could not get file handle");
         }
         
-        hts_pos_t seq_len;
-        char* seq = fai_fetch64(fai, region.c_str(), &seq_len);
+        std::string result;
+        result.reserve(end - start);  // Pre-allocate space
         
-        if (!seq) {
-            fai_destroy(fai);
-            throw std::runtime_error("Failed to fetch sequence for region: " + region);
+        // Calculate file offset for start position
+        int64_t offset = entry.calculate_offset(start);
+        
+        // Seek to the start position
+        if (!file->seek(offset)) {
+            throw std::runtime_error("Failed to seek to position " + std::to_string(offset));
         }
         
-        std::string result(seq, seq_len);
-        free(seq);
-        fai_destroy(fai);
+        // Variable to track our current position in the sequence
+        int64_t current_pos = start;
+        
+        // Read buffer - significantly larger than typical line size
+        std::vector<char> buffer(16384);  // 16KB buffer
+        
+        while (current_pos < end) {
+            // Calculate how many bases are left on the current line
+            int64_t line_offset = current_pos % entry.line_bases;
+            int64_t bases_left_on_line = entry.line_bases - line_offset;
+            
+            // Calculate how many bases we can read at once
+            int64_t bases_to_read = std::min(bases_left_on_line, end - current_pos);
+            
+            // Read the bases
+            int64_t bytes_read = file->read(buffer.data(), bases_to_read);
+            if (bytes_read < bases_to_read) {
+                throw std::runtime_error("Failed to read data at position " + std::to_string(current_pos));
+            }
+            
+            // Append to result
+            result.append(buffer.data(), bytes_read);
+            
+            // Update current position
+            current_pos += bytes_to_read;
+            
+            // If we've reached the end of a line and there's more to read,
+            // we need to skip over the newline character(s)
+            if (current_pos < end && (current_pos % entry.line_bases) == 0) {
+                int newline_size = entry.line_width - entry.line_bases;
+                file->seek(file->seek(0, SEEK_CUR) + newline_size);
+            }
+        }
+        
+        return result;
+    }
+    
+    /**
+     * @brief Retrieve quality scores from file (FASTQ only)
+     * 
+     * @param entry Index entry for the sequence
+     * @param start Start position (0-based)
+     * @param end End position (0-based, exclusive)
+     * @return std::string The requested quality data
+     */
+    std::string retrieve_quality_data(const IndexEntry& entry, 
+                                     int64_t start, 
+                                     int64_t end) const {
+        // Similar to retrieve_sequence_data but using the qual_offset
+        // Boundary checks
+        if (start < 0) start = 0;
+        if (end > entry.length) end = entry.length;
+        if (start >= end) return "";
+        
+        // Get thread-local file handle
+        BGZFReader* file = get_thread_local_file();
+        if (!file) {
+            throw std::runtime_error("Could not get file handle");
+        }
+        
+        std::string result;
+        result.reserve(end - start);
+        
+        // Quality scores are organized like sequence data, but with a different offset
+        int64_t offset = entry.qual_offset + start;
+        
+        // Adjust offset for newlines in the quality data
+        int64_t line_number = start / entry.line_bases;
+        offset += line_number * (entry.line_width - entry.line_bases);
+        
+        // Seek to the start position
+        if (!file->seek(offset)) {
+            throw std::runtime_error("Failed to seek to quality position " + std::to_string(offset));
+        }
+        
+        // Variable to track our current position in the sequence
+        int64_t current_pos = start;
+        
+        // Read buffer
+        std::vector<char> buffer(16384);  // 16KB buffer
+        
+        while (current_pos < end) {
+            // Calculate how many bases are left on the current line
+            int64_t line_offset = current_pos % entry.line_bases;
+            int64_t bases_left_on_line = entry.line_bases - line_offset;
+            
+            // Calculate how many bases we can read at once
+            int64_t bases_to_read = std::min(bases_left_on_line, end - current_pos);
+            
+            // Read the bases
+            int64_t bytes_read = file->read(buffer.data(), bases_to_read);
+            if (bytes_read < bases_to_read) {
+                throw std::runtime_error("Failed to read quality data at position " + std::to_string(current_pos));
+            }
+            
+            // Append to result
+            result.append(buffer.data(), bytes_read);
+            
+            // Update current position
+            current_pos += bytes_to_read;
+            
+            // Skip newline if needed
+            if (current_pos < end && (current_pos % entry.line_bases) == 0) {
+                int newline_size = entry.line_width - entry.line_bases;
+                file->seek(file->seek(0, SEEK_CUR) + newline_size);
+            }
+        }
         
         return result;
     }
@@ -428,69 +534,26 @@ public:
         try {
             std::cout << "Opening FASTA file: " << fasta_path << std::endl;
             
-            int flags = 0;
-            if (build_index) {
-                flags |= FAI_CREATE;
-            }
-            
-            // Try to use htslib faidx directly
-            faidx_t* fai = fai_load3(fasta_path.c_str(), NULL, NULL, flags);
-            
-            if (!fai) {
-                std::string error_msg = "Failed to load or build index for " + fasta_path;
-                if (errno != 0) {
-                    error_msg += " - " + std::string(strerror(errno));
-                }
-                throw std::runtime_error(error_msg);
-            }
-            
-            // Successfully loaded with htslib, extract the index data
-            format_ = FileFormat::FASTA; // Default to FASTA, we'll check for FASTQ later
-            
-            // Get sequence names and lengths
-            int n_seqs = faidx_nseq(fai);
-            std::cout << "Found " << n_seqs << " sequences in index" << std::endl;
-            
-            for (int i = 0; i < n_seqs; i++) {
-                const char* name = faidx_iseq(fai, i);
-                sequence_names_.push_back(name);
-                
-                // Create an entry
-                IndexEntry entry;
-                entry.name = name;
-                entry.length = faidx_seq_len64(fai, name);
-                
-                // Open the index file to get more details
-                std::string fai_path = fasta_path + ".fai";
-                std::ifstream index_file(fai_path);
-                if (index_file.is_open()) {
-                    std::string line;
-                    while (std::getline(index_file, line)) {
-                        std::istringstream iss(line);
-                        std::string seq_name;
-                        int64_t len, offset;
-                        int32_t line_bases, line_width;
-                        
-                        if (!(iss >> seq_name >> len >> offset >> line_bases >> line_width)) {
-                            continue;  // Skip malformed lines
-                        }
-                        
-                        if (seq_name == name) {
-                            entry.offset = offset;
-                            entry.line_bases = line_bases;
-                            entry.line_width = line_width;
-                            break;
-                        }
+            // Check for index file
+            std::string fai_path = fasta_path + ".fai";
+            if (access(fai_path.c_str(), F_OK) != 0) {
+                if (build_index) {
+                    std::cout << "Index not found, building index..." << std::endl;
+                    if (!build_index_internal(fai_path)) {
+                        throw std::runtime_error("Failed to build index for " + fasta_path);
                     }
+                } else {
+                    throw std::runtime_error("Index file not found: " + fai_path + 
+                                            ". Use build_index=true to create it.");
                 }
-                
-                entries_[name] = entry;
             }
             
-            std::cout << "Index loaded successfully" << std::endl;
+            // Load the index from the .fai file
+            if (!load_index(fai_path)) {
+                throw std::runtime_error("Failed to load index from " + fai_path);
+            }
             
-            // Remember to clean up
-            fai_destroy(fai);
+            std::cout << "Index loaded successfully. Found " << entries_.size() << " sequences." << std::endl;
             
         } catch (const std::exception& e) {
             throw std::runtime_error("Error initializing FastaReader: " + std::string(e.what()));
@@ -563,33 +626,17 @@ public:
      */
     std::string fetch_sequence(const std::string& contig, int64_t start, int64_t end) const {
         try {
-            // Use htslib directly for more robust sequence fetching
-            faidx_t* fai = fai_load(filename_.c_str());
-            if (!fai) {
-                throw std::runtime_error("Failed to load index for " + filename_);
+            // Find the entry
+            auto it = entries_.find(contig);
+            if (it == entries_.end()) {
+                throw std::runtime_error("Sequence not found: " + contig);
             }
             
-            // Convert to 1-based, inclusive coordinates for faidx_fetch_seq64
-            hts_pos_t len;
-            char* seq = faidx_fetch_seq64(fai, contig.c_str(), start, end-1, &len);
+            const IndexEntry& entry = it->second;
             
-            if (!seq) {
-                if (!faidx_has_seq(fai, contig.c_str())) {
-                    fai_destroy(fai);
-                    throw std::runtime_error("Sequence not found: " + contig);
-                } else {
-                    fai_destroy(fai);
-                    throw std::runtime_error("Failed to fetch sequence region: " + 
-                                            contig + ":" + std::to_string(start) + 
-                                            "-" + std::to_string(end));
-                }
-            }
+            // Directly retrieve the sequence
+            return retrieve_sequence_data(entry, start, end);
             
-            std::string result(seq, len);
-            free(seq);
-            fai_destroy(fai);
-            
-            return result;
         } catch (const std::exception& e) {
             throw std::runtime_error("Error fetching sequence: " + std::string(e.what()));
         }
@@ -633,13 +680,8 @@ public:
         
         const IndexEntry& entry = it->second;
         
-        // Boundary checks
-        if (start < 0) start = 0;
-        if (end > entry.length) end = entry.length;
-        if (start >= end) return "";
-        
         // Retrieve the quality scores
-        return retrieve_data(entry, entry.qual_offset, start, end);
+        return retrieve_quality_data(entry, start, end);
     }
     
     /**

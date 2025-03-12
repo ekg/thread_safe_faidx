@@ -32,18 +32,36 @@ void worker_thread(const ts_faidx::FastaReader& reader,
         // Create a dedicated BGZFReader for this thread
         std::unique_ptr<ts_faidx::BGZFReader> file(reader.create_reader());
         
+        // Create a FastaFileReader as an alternative for more reliable access
+        std::unique_ptr<ts_faidx::FastaFileReader> fast_reader(new ts_faidx::FastaFileReader(reader.get_filename()));
+        
         // Track retries and failures
         int consecutive_failures = 0;
         const int max_failures = 3;
         
         for (size_t i = start_idx; i < end_idx; ++i) {
             try {
-                // Create a new BGZFReader for each query to ensure clean state
+                std::string sequence;
+                
                 if (consecutive_failures > 0) {
-                    file.reset(reader.create_reader());
+                    // After a failure, try using the FastaFileReader instead
+                    auto region_parts = split_region(regions[i]);
+                    std::string seq_name = region_parts.first;
+                    int64_t start = region_parts.second.first;
+                    int64_t length = region_parts.second.second - start;
+                    
+                    // Get the entry details
+                    auto entry = reader.get_entry(seq_name);
+                    
+                    // Use the more reliable reader
+                    sequence = fast_reader->get_sequence(
+                        entry.offset, entry.line_bases, entry.line_width, 
+                        start, length);
+                } else {
+                    // Try with BGZFReader first
+                    sequence = reader.fetch_sequence(file.get(), regions[i]);
                 }
                 
-                auto sequence = reader.fetch_sequence(file.get(), regions[i]);
                 completed++;
                 consecutive_failures = 0;
                 
@@ -62,11 +80,12 @@ void worker_thread(const ts_faidx::FastaReader& reader,
             } catch (const std::exception& e) {
                 consecutive_failures++;
                 
-                // Recycle file handle if we're hitting errors
+                // Try with a fresh file handle after failures
                 if (consecutive_failures >= max_failures) {
                     std::cerr << "Thread " << thread_id << " had " << consecutive_failures 
-                              << " failures, recycling file handle" << std::endl;
+                              << " failures, recycling file handles" << std::endl;
                     file.reset(reader.create_reader());
+                    fast_reader.reset(new ts_faidx::FastaFileReader(reader.get_filename()));
                     consecutive_failures = 0;
                 }
                 
@@ -77,6 +96,38 @@ void worker_thread(const ts_faidx::FastaReader& reader,
     } catch (const std::exception& e) {
         std::cerr << "Thread " << thread_id << " fatal error: " << e.what() << std::endl;
     }
+}
+
+// Helper function to split a region string into name and coordinates
+std::pair<std::string, std::pair<int64_t, int64_t>> split_region(const std::string& region) {
+    std::string seq_name;
+    int64_t start = 0, end = 0;
+    
+    // Find the colon separating name from coordinates
+    size_t colon_pos = region.find(':');
+    if (colon_pos == std::string::npos) {
+        // No coordinates, just a sequence name
+        return std::make_pair(region, std::make_pair(0, -1)); // -1 end means whole sequence
+    }
+    
+    seq_name = region.substr(0, colon_pos);
+    
+    // Find the dash separating start and end
+    size_t dash_pos = region.find('-', colon_pos);
+    if (dash_pos == std::string::npos) {
+        // Just a single position
+        start = std::stoll(region.substr(colon_pos + 1));
+        end = start + 1;
+    } else {
+        // Range with start and end
+        start = std::stoll(region.substr(colon_pos + 1, dash_pos - colon_pos - 1));
+        end = std::stoll(region.substr(dash_pos + 1));
+    }
+    
+    // Convert to 0-based coordinates if needed
+    if (start > 0) start--;
+    
+    return std::make_pair(seq_name, std::make_pair(start, end));
 }
 
 int main(int argc, char* argv[]) {

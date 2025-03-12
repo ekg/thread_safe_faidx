@@ -46,8 +46,8 @@ void worker_thread(const ts_faidx::FastaReader& reader,
             try {
                 std::string sequence;
                 
-                // For compressed files, prefer using FastaFileReader directly
-                if (file->is_compressed() || consecutive_failures > 0) {
+                // If we've had failures, try using FastaFileReader
+                if (consecutive_failures > 0) {
                     // Use the more robust FastaFileReader implementation
                     std::string seq_name;
                     int64_t start, end;

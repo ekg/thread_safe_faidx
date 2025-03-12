@@ -104,10 +104,20 @@ public:
      * @brief Seek to position in the file
      * 
      * @param position File offset
+     * @param whence SEEK_SET, SEEK_CUR, or SEEK_END
      * @return true if successful
      */
-    bool seek(int64_t position) {
-        return bgzf_seek(bgzf_, position, SEEK_SET) >= 0;
+    bool seek(int64_t position, int whence = SEEK_SET) {
+        return bgzf_seek(bgzf_, position, whence) >= 0;
+    }
+    
+    /**
+     * @brief Get current position in the file
+     * 
+     * @return int64_t Current position
+     */
+    int64_t tell() const {
+        return bgzf_tell(bgzf_);
     }
     
     /**
@@ -310,13 +320,13 @@ private:
             result.append(buffer.data(), bytes_read);
             
             // Update current position
-            current_pos += bytes_to_read;
+            current_pos += bases_to_read;
             
             // If we've reached the end of a line and there's more to read,
             // we need to skip over the newline character(s)
             if (current_pos < end && (current_pos % entry.line_bases) == 0) {
                 int newline_size = entry.line_width - entry.line_bases;
-                file->seek(file->seek(0, SEEK_CUR) + newline_size);
+                file->seek(file->tell() + newline_size);
             }
         }
         
@@ -385,12 +395,12 @@ private:
             result.append(buffer.data(), bytes_read);
             
             // Update current position
-            current_pos += bytes_to_read;
+            current_pos += bases_to_read;
             
             // Skip newline if needed
             if (current_pos < end && (current_pos % entry.line_bases) == 0) {
                 int newline_size = entry.line_width - entry.line_bases;
-                file->seek(file->seek(0, SEEK_CUR) + newline_size);
+                file->seek(file->tell() + newline_size);
             }
         }
         

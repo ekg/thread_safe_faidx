@@ -288,6 +288,7 @@ private:
     std::string filename_;
     bool is_compressed_ = false;
     int cache_size_ = 8 * 1024 * 1024;  // 8MB default cache
+    static std::mutex bgzf_mutex_; // Static mutex for BGZF operations
     
 public:
     /**
@@ -335,7 +336,14 @@ public:
      * @return true if successful
      */
     bool seek(int64_t position, int whence = SEEK_SET) {
-        return bgzf_seek(bgzf_, position, whence) >= 0;
+        std::lock_guard<std::mutex> lock(bgzf_mutex_);
+        int result = bgzf_seek(bgzf_, position, whence);
+        if (result < 0) {
+            std::cerr << "BGZF seek failed to position " << position 
+                      << " with error code " << result 
+                      << " (compressed: " << (is_compressed_ ? "yes" : "no") << ")" << std::endl;
+        }
+        return result >= 0;
     }
     
     /**
@@ -355,7 +363,15 @@ public:
      * @return int64_t Number of bytes read
      */
     int64_t read(void* buffer, size_t length) {
-        return bgzf_read(bgzf_, buffer, length);
+        std::lock_guard<std::mutex> lock(bgzf_mutex_);
+        int64_t bytes_read = bgzf_read(bgzf_, buffer, length);
+        if (bytes_read < 0) {
+            std::cerr << "BGZF read failed for " << length 
+                      << " bytes with error code " << bytes_read 
+                      << " at position " << bgzf_tell(bgzf_)
+                      << " (compressed: " << (is_compressed_ ? "yes" : "no") << ")" << std::endl;
+        }
+        return bytes_read;
     }
     
     /**
@@ -1029,6 +1045,9 @@ public:
         // Nothing to cleanup here as file handles are managed externally
     }
 };
+
+// Initialize static member
+std::mutex BGZFReader::bgzf_mutex_;
 
 } // namespace ts_faidx
 

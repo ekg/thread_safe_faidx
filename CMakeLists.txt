@@ -47,11 +47,18 @@ if(ZLIB_FOUND)
     add_definitions(-DHAVE_ZLIB)
 endif()
 
-# Add executable
+# Add executables
 add_executable(fasta_reader src/fasta_reader.cpp)
+add_executable(test_fasta_reader test_fasta_reader.cpp)
 
 # Link libraries
 target_link_libraries(fasta_reader
+    Threads::Threads
+    ${HTSLIB_LIBRARIES}
+    ${ZLIB_LIBRARIES}
+)
+
+target_link_libraries(test_fasta_reader
     Threads::Threads
     ${HTSLIB_LIBRARIES}
     ${ZLIB_LIBRARIES}

@@ -28,30 +28,54 @@ void worker_thread(const ts_faidx::FastaReader& reader,
                    int thread_id,
                    std::ofstream* output_file,
                    std::mutex* file_mutex) {
-    // Create a dedicated BGZFReader for this thread
-    std::unique_ptr<ts_faidx::BGZFReader> file(reader.create_reader());
-    
-    for (size_t i = start_idx; i < end_idx; ++i) {
-        try {
-            auto sequence = reader.fetch_sequence(file.get(), regions[i]);
-            completed++;
-            
-            // Write to output file if specified
-            if (output_file && file_mutex) {
-                std::lock_guard<std::mutex> lock(*file_mutex);
-                *output_file << ">" << regions[i] << "\n" 
-                           << sequence << "\n";
+    try {
+        // Create a dedicated BGZFReader for this thread
+        std::unique_ptr<ts_faidx::BGZFReader> file(reader.create_reader());
+        
+        // Track retries and failures
+        int consecutive_failures = 0;
+        const int max_failures = 3;
+        
+        for (size_t i = start_idx; i < end_idx; ++i) {
+            try {
+                // Create a new BGZFReader for each query to ensure clean state
+                if (consecutive_failures > 0) {
+                    file.reset(reader.create_reader());
+                }
+                
+                auto sequence = reader.fetch_sequence(file.get(), regions[i]);
+                completed++;
+                consecutive_failures = 0;
+                
+                // Write to output file if specified
+                if (output_file && file_mutex) {
+                    std::lock_guard<std::mutex> lock(*file_mutex);
+                    *output_file << ">" << regions[i] << "\n" 
+                               << sequence << "\n";
+                }
+                
+                // Occasionally print progress
+                if (completed % 100 == 0) {
+                    std::cout << "Progress: " << completed << "/" << regions.size() 
+                              << " sequences read" << std::endl;
+                }
+            } catch (const std::exception& e) {
+                consecutive_failures++;
+                
+                // Recycle file handle if we're hitting errors
+                if (consecutive_failures >= max_failures) {
+                    std::cerr << "Thread " << thread_id << " had " << consecutive_failures 
+                              << " failures, recycling file handle" << std::endl;
+                    file.reset(reader.create_reader());
+                    consecutive_failures = 0;
+                }
+                
+                std::cerr << "Thread " << thread_id << " error: " << e.what() 
+                          << " for region " << regions[i] << std::endl;
             }
-            
-            // Occasionally print progress
-            if (completed % 100 == 0) {
-                std::cout << "Progress: " << completed << "/" << regions.size() 
-                          << " sequences read" << std::endl;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Thread " << thread_id << " error: " << e.what() 
-                      << " for region " << regions[i] << std::endl;
         }
+    } catch (const std::exception& e) {
+        std::cerr << "Thread " << thread_id << " fatal error: " << e.what() << std::endl;
     }
 }
 

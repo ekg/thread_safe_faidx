@@ -72,6 +72,7 @@ private:
     BGZF* bgzf_ = nullptr;
     std::string filename_;
     bool is_compressed_ = false;
+    int cache_size_ = 8 * 1024 * 1024;  // 8MB default cache
     
 public:
     /**
@@ -89,6 +90,17 @@ public:
         
         // Check if it's compressed
         is_compressed_ = bgzf_compression(bgzf_) > 0;
+        
+        // Set a larger cache for better performance with random access
+        bgzf_set_cache_size(bgzf_, cache_size_);
+        
+        // For compressed files, enable multithreaded decompression
+        if (is_compressed_) {
+            int threads = 2;  // Use 2 threads for decompression
+            if (bgzf_mt(bgzf_, threads, 256) != 0) {
+                std::cerr << "Warning: Failed to enable multithreaded decompression" << std::endl;
+            }
+        }
     }
     
     /**
@@ -259,52 +271,81 @@ private:
             throw std::runtime_error("Invalid file handle");
         }
         
-        std::string result;
-        result.reserve(end - start);  // Pre-allocate space
-        
-        // Calculate file offset for start position
-        int64_t offset = entry.calculate_offset(start);
-        
-        // Seek to the start position
-        if (!file->seek(offset)) {
-            throw std::runtime_error("Failed to seek to position " + std::to_string(offset));
-        }
-        
-        // Variable to track our current position in the sequence
-        int64_t current_pos = start;
-        
-        // Read buffer - significantly larger than typical line size
-        std::vector<char> buffer(16384);  // 16KB buffer
-        
-        while (current_pos < end) {
-            // Calculate how many bases are left on the current line
-            int64_t line_offset = current_pos % entry.line_bases;
-            int64_t bases_left_on_line = entry.line_bases - line_offset;
+        try {
+            std::string result;
+            result.reserve(end - start);  // Pre-allocate space
             
-            // Calculate how many bases we can read at once
-            int64_t bases_to_read = std::min(bases_left_on_line, end - current_pos);
+            // Calculate file offset for start position
+            int64_t offset = entry.calculate_offset(start);
             
-            // Read the bases
-            int64_t bytes_read = file->read(buffer.data(), bases_to_read);
-            if (bytes_read < bases_to_read) {
-                throw std::runtime_error("Failed to read data at position " + std::to_string(current_pos));
+            // Seek to the start position
+            if (!file->seek(offset)) {
+                throw std::runtime_error("Failed to seek to position " + std::to_string(offset));
             }
             
-            // Append to result
-            result.append(buffer.data(), bytes_read);
+            // Variable to track our current position in the sequence
+            int64_t current_pos = start;
             
-            // Update current position
-            current_pos += bases_to_read;
+            // Read buffer - significantly larger than typical line size
+            std::vector<char> buffer(4096);  // 4KB buffer (smaller to avoid large reads)
             
-            // If we've reached the end of a line and there's more to read,
-            // we need to skip over the newline character(s)
-            if (current_pos < end && (current_pos % entry.line_bases) == 0) {
-                int newline_size = entry.line_width - entry.line_bases;
-                file->seek(file->tell() + newline_size);
+            while (current_pos < end) {
+                // Calculate how many bases are left on the current line
+                int64_t line_offset = current_pos % entry.line_bases;
+                int64_t bases_left_on_line = entry.line_bases - line_offset;
+                
+                // Calculate how many bases we can read at once
+                int64_t bases_to_read = std::min(bases_left_on_line, end - current_pos);
+                bases_to_read = std::min(bases_to_read, (int64_t)buffer.size() - 1); // Ensure we don't exceed buffer
+                
+                if (bases_to_read <= 0) {
+                    break; // Safety check
+                }
+                
+                // Read the bases
+                int64_t bytes_read = file->read(buffer.data(), bases_to_read);
+                if (bytes_read <= 0) {
+                    if (bytes_read < 0) {
+                        throw std::runtime_error("Read error at position " + std::to_string(current_pos));
+                    } else {
+                        throw std::runtime_error("Unexpected end of file at position " + std::to_string(current_pos));
+                    }
+                }
+                
+                // Add null terminator to ensure safe string operations
+                buffer[bytes_read] = '\0';
+                
+                // Append to result
+                result.append(buffer.data(), bytes_read);
+                
+                // Update current position
+                current_pos += bytes_read;
+                
+                // If we've reached the end of a line and there's more to read,
+                // we need to skip over the newline character(s)
+                if (current_pos < end && (current_pos % entry.line_bases) == 0) {
+                    int newline_size = entry.line_width - entry.line_bases;
+                    
+                    // For small newlines, read them to advance the file position safely
+                    if (newline_size <= 2) {
+                        char newline_buf[3] = {0};
+                        if (file->read(newline_buf, newline_size) != newline_size) {
+                            throw std::runtime_error("Failed to read newline at position " + std::to_string(current_pos));
+                        }
+                    } else {
+                        // For larger newlines, perform a seek
+                        if (!file->seek(file->tell() + newline_size)) {
+                            throw std::runtime_error("Failed to seek past newline at position " + std::to_string(current_pos));
+                        }
+                    }
+                }
             }
+            
+            return result;
         }
-        
-        return result;
+        catch (const std::exception& e) {
+            throw std::runtime_error(std::string("Error in retrieve_sequence_data: ") + e.what());
+        }
     }
     
     /**
@@ -723,6 +764,15 @@ public:
             return -1; // Sequence not found
         }
         return it->second.length;
+    }
+    
+    /**
+     * @brief Get all index entries
+     * 
+     * @return const std::unordered_map<std::string, IndexEntry>& The index entries
+     */
+    const std::unordered_map<std::string, IndexEntry>& get_entries() const {
+        return entries_;
     }
     
     /**

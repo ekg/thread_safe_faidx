@@ -20,6 +20,7 @@ void print_usage(const char* program) {
     std::cerr << "  -h             Show this help message" << std::endl;
 }
 
+
 // Worker function that reads sequences in a thread
 void worker_thread(const ts_faidx::FastaReader& reader, 
                    const std::vector<std::string>& regions,

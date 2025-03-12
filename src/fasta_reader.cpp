@@ -11,6 +11,7 @@
 #include <mutex>
 
 
+
 void print_usage(const char* program) {
     std::cerr << "Usage: " << program << " [options] <fasta_file>" << std::endl;
     std::cerr << "Options:" << std::endl;
